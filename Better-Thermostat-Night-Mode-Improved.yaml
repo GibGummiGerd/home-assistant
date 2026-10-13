@@ -1,0 +1,120 @@
+blueprint:
+  name: Better Thermostat Night mode
+  description: >
+    Set BT Thermostats to the Sleep preset when a Schedule event is active,
+    and restore the preset that was active before the schedule started when it ends.
+    The previous presets are stored in a dynamic scene when the schedule turns on.
+    If no stored state is available (e.g. after a Home Assistant restart), the
+    None (normal) preset is used as fallback.
+    Requires the Sleep preset to be enabled in your Better Thermostat configuration.
+  domain: automation
+  source_url: https://github.com/KartoffelToby/better_thermostat/blob/master/blueprints/night_mode.yaml
+  input:
+    night_times_schedule:
+      name: Schedule helper
+      selector:
+        entity:
+          domain: schedule
+
+    thermostat_target:
+      name: Thermostats
+      selector:
+        target:
+          device:
+            integration: better_thermostat
+          entity:
+            integration: better_thermostat
+            domain: climate
+
+mode: queued
+max_exceeded: silent
+
+variables:
+  thermostat_target: !input thermostat_target
+  # Resolve the target selector (entities, devices, areas, labels) into a flat
+  # list of Better Thermostat climate entities.
+  thermostat_entities: >-
+    {% set ns = namespace(ids=[]) %}
+    {% set target = thermostat_target if thermostat_target is mapping else {} %}
+    {% for key in ['entity_id', 'device_id', 'area_id', 'label_id'] %}
+      {% set values = target.get(key, []) %}
+      {% set values = [values] if values is string else (values or []) %}
+      {% for value in values %}
+        {% if key == 'entity_id' %}
+          {% set ns.ids = ns.ids + [value] %}
+        {% elif key == 'device_id' %}
+          {% set ns.ids = ns.ids + device_entities(value) %}
+        {% elif key == 'area_id' %}
+          {% set ns.ids = ns.ids + area_entities(value) %}
+        {% elif key == 'label_id' %}
+          {% set ns.ids = ns.ids + label_entities(value) %}
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+    {{ ns.ids
+       | select('match', 'climate\.')
+       | select('in', integration_entities('better_thermostat'))
+       | unique | list }}
+  restore_scene_id: "{{ this.entity_id.split('.')[1] }}_bt_night_mode_restore"
+  restore_scene_entity: "scene.{{ restore_scene_id }}"
+
+trigger:
+  - platform: state
+    entity_id: !input night_times_schedule
+    from: "on"
+    to: "off"
+  - platform: state
+    entity_id: !input night_times_schedule
+    from: "off"
+    to: "on"
+condition: []
+action:
+  - if:
+      - condition: state
+        entity_id: !input night_times_schedule
+        state: "on"
+    then:
+      # Remember the preset of every thermostat before switching to sleep.
+      # A thermostat that is already in "sleep" is restored to "none" so it
+      # does not stay in sleep mode forever. The "state" value is a placeholder
+      # that is not a valid HVAC mode, so only the preset is restored later.
+      - variables:
+          saved_states: >-
+            {% set ns = namespace(items=[]) %}
+            {% for entity_id in thermostat_entities %}
+              {% set preset = state_attr(entity_id, 'preset_mode') %}
+              {% if preset is not none %}
+                {% set preset = 'none' if preset == 'sleep' else preset %}
+                {% set ns.items = ns.items + [(entity_id, {'state': 'unknown', 'preset_mode': preset})] %}
+              {% endif %}
+            {% endfor %}
+            {{ dict(ns.items) }}
+      - if:
+          - condition: template
+            value_template: "{{ saved_states | length > 0 }}"
+        then:
+          - service: scene.create
+            data:
+              scene_id: "{{ restore_scene_id }}"
+              entities: "{{ saved_states }}"
+      - service: climate.set_preset_mode
+        data:
+          preset_mode: sleep
+        target: !input thermostat_target
+    else:
+      - if:
+          - condition: template
+            value_template: "{{ states[restore_scene_entity] is not none }}"
+        then:
+          - service: scene.turn_on
+            target:
+              entity_id: "{{ restore_scene_entity }}"
+          - service: scene.delete
+            continue_on_error: true
+            target:
+              entity_id: "{{ restore_scene_entity }}"
+        else:
+          - service: climate.set_preset_mode
+            data:
+              preset_mode: none
+            target: !input thermostat_target
