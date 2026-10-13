@@ -1,5 +1,5 @@
 blueprint:
-  name: Better Thermostat Night mode
+  name: Better Thermostat Night Mode Improved
   description: >
     Set BT Thermostats to the Sleep preset when a Schedule event is active,
     and restore the preset that was active before the schedule started when it ends.
